@@ -1,87 +1,109 @@
-// Alarm Control Panel custom card
-// Orignally by Kevin Cooper (no relation) at https://github.com/JumpMaster/custom-lovelace
-// Modified by John S Cooper at https://github.com/jcooper-korg/AlarmPanel
-// customized button appearance and colors, hide keypad when disarmed if !code_arm_required, new confirm_entities config option, etc
-// See example config at https://github.com/jcooper-korg/AlarmPanel/ExampleConfig
-//
-// if confirm_entities is provided, then when disarmed, it will show "Ready" in
-// the status title if all those entities are off, otherwise it'll show "Not Ready".
-// (can customize those strings in the labels config using ready and not_ready).
-// also, if confirm_entities, disable_arm_if_not_ready, and show_override_if_not_ready are all set, then
-// it will show an Override checkbox when not ready.
-//
-// if show_countdown_timer is enabled, then the config should specify a list of durations (in seconds) for the arming and pending states
-//
-// if alarm_control_panel.code_arm_required is set, the keypad will be shown when disarmed, regardless of the
-// hide_keypad and auto_hide options.
+interface Config {
+  entity: string;
+  show_override_if_not_ready?: boolean;
+  disable_arm_if_not_ready?: boolean;
+  confirm_entities?: string[];
+  auto_enter?: {
+    code_length: number;
+    arm_action: string;
+  };
+  states?: string[];
+  scale?: string;
+  show_countdown_timer?: boolean;
+  durations?: Record<string, number>;
+  title?: string;
+  hide_keypad?: boolean;
+  style?: string;
+  display_letters?: boolean;
+  auto_hide?: boolean;
+  show_label_ids?: boolean;
+  labels?: Record<string, string>;
+}
+
+const ICONS = {
+  armed_away: "mdi:shield-lock",
+  armed_custom_bypass: "mdi:security",
+  armed_home: "mdi:shield-home",
+  armed_night: "mdi:shield-home",
+  disarmed: "mdi:shield-check",
+  pending: "mdi:shield-outline",
+  triggered: "hass:bell-ring"
+};
 
 class AlarmControlPanelCard extends HTMLElement {
+  private myhass: any;
+  private code_arm_required: boolean = false;
+  private has_numeric_code: boolean = false;
+  private _config!: Config;
+  private _icons: Record<string, string> = ICONS;
+  private _entitiesReady: boolean = false;
+  private _previousAlarmState: string = "disarmed";
+  private _state!: string;
+  private _countdownTimerFunction: any | null = null;
+  private _timerRadius: number = 30;
+  private _timerStrokeWidth: number = this._timerRadius / 5;
+  private _timerSize: number = 2 * (this._timerRadius + this._timerStrokeWidth);
+  private _currentStateDuration: number = 0;
+  private _autoarm_action: string = "";
+  private _strokeWidth: number = 0;
+
   constructor() {
     super();
-    this.attachShadow({ mode: 'open' });
-    this._icons = {
-      'armed_away': 'mdi:shield-lock',
-      'armed_custom_bypass': 'mdi:security',
-      'armed_home': 'mdi:shield-home',
-      'armed_night': 'mdi:shield-home',
-      'disarmed': 'mdi:shield-check',
-      'pending': 'mdi:shield-outline',
-      'triggered': 'hass:bell-ring',
-    }
-    this._entitiesReady = false;
-    this._previousAlarmState = 'disarmed';
-    this._countdownTimerFunction = null;
-    this._timerRadius = 30;
-    this._timerStrokeWidth = this._timerRadius / 5;
-    this._timerSize = 2 * (this._timerRadius + this._timerStrokeWidth);
-    this._currentStateDuration = 0;
+    this.attachShadow({ mode: "open" });
   }
 
-  set hass(hass) {
+  set hass(hass: any) {
     const entity = hass.states[this._config.entity];
 
     if (entity) {
       this.myhass = hass;
       this.code_arm_required = entity.attributes.code_arm_required;
-      this.has_numeric_code = !entity.attributes.code_format || entity.attributes.code_format == "number";
-      if(!this.shadowRoot.lastChild) {
-        this._createCard(entity);
+      this.has_numeric_code =
+        !entity.attributes.code_format || entity.attributes.code_format === "number";
+
+      if (!this.shadowRoot?.lastChild) {
+        this._createCard();
       }
-      
+
       const updatedEntitiesReady = this._confirmEntitiesReady();
-      if (entity.state != this._state || this._entitiesReady != updatedEntitiesReady) {
+
+      if (entity.state !== this._state || this._entitiesReady !== updatedEntitiesReady) {
         this._previousAlarmState = this._state;
         this._state = entity.state;
         this._entitiesReady = updatedEntitiesReady;
-        this._updateCardContent(entity);
+        this._updateCardContent();
       }
     }
   }
 
-  _createCard(entity) {
+  _createCard() {
     const config = this._config;
 
-    const card = document.createElement('ha-card');
+    const card = document.createElement("ha-card");
     card.innerHTML = `
       ${this._iconLabel()}
       ${this._timerCanvas()}
-      ${config.title ? '<div id="state-text"></div>' : ''}
+      ${config.title ? '<div id="state-text"></div>' : ""}
     `;
 
-    const content = document.createElement('div');
+    const content = document.createElement("div");
     content.id = "content";
-    content.style.display = config.auto_hide ? 'none' : '';
+    content.style.display = config.auto_hide ? "none" : "";
     content.innerHTML = `
       ${this._actionButtons()}
-      ${this.has_numeric_code ?
-          `<ha-textfield id="input-code" label='${this._label("ui.card.alarm_control_panel.code")}'
-          type="password"></ha-textfield>` : ''}
-      ${this._keypad(entity)}
+      ${
+        this.has_numeric_code
+          ? `<ha-textfield id="input-code" label='${this._label(
+              "ui.card.alarm_control_panel.code"
+            )}' type="password"></ha-textfield>`
+          : ""
+      }
+      ${this._keypad()}
     `;
 
-    card.appendChild(this._style(config.style, entity));
+    card.appendChild(this._style(config.style ?? ""));
     card.appendChild(content);
-    this.shadowRoot.appendChild(card);
+    this.shadowRoot?.appendChild(card);
     this._showCountdownTimer(false); // start hidden
 
     this._setupInput();
@@ -89,197 +111,222 @@ class AlarmControlPanelCard extends HTMLElement {
     this._setupActions();
   }
 
-  connectedCallback() {
-  }
-
-  setConfig(config) {
+  setConfig(config: Config) {
     if (!config.entity || config.entity.split(".")[0] !== "alarm_control_panel") {
-      throw new Error('Please specify an entity from alarm_control_panel domain.');
+      throw new Error("Please specify an entity from alarm_control_panel domain.");
     }
 
     if (config.show_override_if_not_ready && !config.disable_arm_if_not_ready) {
-        throw new Error('Only specify show_override_if_not_ready if disable_arm_if_not_ready is enabled.');
+      throw new Error(
+        "Only specify show_override_if_not_ready if disable_arm_if_not_ready is enabled."
+      );
     }
 
     if (config.disable_arm_if_not_ready && !config.confirm_entities) {
-        throw new Error('To use disable_arm_if_not_ready, you must specify a list of confirm_entities.');
+      throw new Error(
+        "To use disable_arm_if_not_ready, you must specify a list of confirm_entities."
+      );
     }
 
     if (config.auto_enter) {
       if (!config.auto_enter.code_length || !config.auto_enter.arm_action) {
-        throw new
-          Error('Specify both code_length and arm_action when using auto_enter.');
+        throw new Error("Specify both code_length and arm_action when using auto_enter.");
       }
       this._autoarm_action = config.auto_enter.arm_action;
     }
-    
+
     this._config = Object.assign({}, config);
-    if (!this._config.states) this._config.states = ['arm_away', 'arm_home'];
-    if (!this._config.scale) this._config.scale = '15px';
+    if (!this._config.states) this._config.states = ["arm_away", "arm_home"];
+    if (!this._config.scale) this._config.scale = "15px";
 
     const root = this.shadowRoot;
-    if (root.lastChild) root.removeChild(root.lastChild);
+    if (root?.lastChild) {
+      root.removeChild(root.lastChild);
+    }
   }
 
-  _updateCardContent(entity) {
-    const root = this.shadowRoot;
-    const card = root.lastChild;
+  _updateCardContent() {
     const config = this._config;
- 
+
     if (config.show_countdown_timer && this._previousAlarmState != this._state) {
       // if changing state to arming or pending, and a duration is specified in the config, then start a countdown timer
-      if (this._state == "arming" || this._state == "pending")
-      {
+      if (this._state == "arming" || this._state == "pending") {
         if (this._countdownTimerFunction == null) {
-          if (this._config.durations && this._config.durations[this._state] && this._config.durations[this._state] != 0)
-          {
+          if (
+            this._config.durations &&
+            this._config.durations[this._state] &&
+            this._config.durations[this._state] != 0
+          ) {
             this._currentStateDuration = this._config.durations[this._state];
             this._showCountdownTimer(true);
-            this._doCountdownTimer();	// draw once right away
-            this._countdownTimerFunction = setInterval( () => this._doCountdownTimer(), 1000);
+            this._doCountdownTimer(); // draw once right away
+            this._countdownTimerFunction = setInterval(() => this._doCountdownTimer(), 1000);
           }
         }
-      }
-      else if (this._countdownTimerFunction) {
+      } else if (this._countdownTimerFunction) {
         // stop callback, hide timer
         this._showCountdownTimer(false);
         clearInterval(this._countdownTimerFunction);
         this._countdownTimerFunction = null;
       }
     }
-    
+
     this._updateReady();
- 
-    root.getElementById("state-icon").setAttribute("icon",
-    this._icons[this._state] || 'mdi:shield-outline');
-    root.getElementById("badge-icon").className = this._state;
 
-    var iconText = this._stateIconLabel(this._state);
-    if (iconText === "") {
-      root.getElementById("icon-label").style.display = "none";
-    } else {
-      root.getElementById("icon-label").style.display = "";
-      if (iconText.length > 5) {
-        root.getElementById("icon-label").className = "label big";
+    const stateIconEl = this.shadowRoot?.getElementById("state-icon");
+
+    if (stateIconEl) {
+      stateIconEl.setAttribute("icon", this._icons[this._state] || "mdi:shield-outline");
+    }
+
+    const badgeIconEl = this.shadowRoot?.getElementById("badge-icon");
+    if (badgeIconEl) {
+      badgeIconEl.className = this._state;
+    }
+
+    const iconText = this._stateIconLabel(this._state);
+    const iconLabelEl = this.shadowRoot?.getElementById("icon-label");
+    const iconTextEl = this.shadowRoot?.getElementById("icon-text");
+
+    if (iconLabelEl && iconTextEl) {
+      if (iconText === "") {
+        iconLabelEl.style.display = "none";
       } else {
-        root.getElementById("icon-label").className = "label";
+        iconLabelEl.style.display = "";
+        if (iconText.length > 5) {
+          iconLabelEl.className = "label big";
+        } else {
+          iconLabelEl.className = "label";
+        }
+        iconTextEl.innerHTML = iconText;
       }
-      root.getElementById("icon-text").innerHTML = iconText;
     }
 
-    const armVisible = (this._state === 'disarmed');
-    root.getElementById("arm-actions").style.display = armVisible ? "" : "none";
-    if (!config.hide_keypad && this.has_numeric_code) {
-        root.getElementById("disarm-actions").style.display = armVisible ? "none" : "";
+    const armActionsEl = this.shadowRoot?.getElementById("arm-actions");
+    const disarmActionsEl = this.shadowRoot?.getElementById("disarm-actions");
+
+    const armVisible = this._state === "disarmed";
+    if (armActionsEl) {
+      armActionsEl.style.display = armVisible ? "" : "none";
     }
-    
+    if (!config.hide_keypad && this.has_numeric_code) {
+      if (disarmActionsEl) {
+        disarmActionsEl.style.display = armVisible ? "none" : "";
+      }
+    }
+
     if (config.auto_enter) {
+      const disarmEl = this.shadowRoot?.getElementById("disarm");
+
       if (armVisible) {
         if (!config.confirm_entities || !config.disable_arm_if_not_ready || this._entitiesReady)
           this._autoarm_action = config.auto_enter.arm_action;
-        else
-          this._autoarm_action = "disabled";
-        root.querySelectorAll(".actions button").forEach(element => {
-        element.classList.remove('autoarm');
-        if (element.id === this._autoarm_action)
-          element.classList.add('autoarm');
-        })
-        root.getElementById("disarm").classList.remove('autoarm');
-      }
-      else
-      {
-          this._autoarm_action = 'disarm';
-          root.getElementById("disarm").classList.add('autoarm');
+        else this._autoarm_action = "disabled";
+        this.shadowRoot?.querySelectorAll(".actions button").forEach(element => {
+          element.classList.remove("autoarm");
+          if (element.id === this._autoarm_action) element.classList.add("autoarm");
+        });
+        if (disarmEl) {
+          disarmEl.classList.remove("autoarm");
+        }
+      } else {
+        this._autoarm_action = "disarm";
+        if (disarmEl) {
+          disarmEl.classList.add("autoarm");
+        }
       }
     }
-    
+
     // hide code and number pad if disarmed, if manual alarm config has code_arm_required=false
     if (!this.code_arm_required) {
-      if (!config.hide_keypad) {
-        root.getElementById("keypad").style.display = armVisible ? "none" : "flex";
+      const keypadEl = this.shadowRoot?.getElementById("keypad");
+      if (!config.hide_keypad && keypadEl) {
+        keypadEl.style.display = armVisible ? "none" : "flex";
       }
-      if (this.has_numeric_code) {
-        root.getElementById("input-code").style.display = armVisible ? "none" : "";
+      const inputCodeEl = this.shadowRoot?.getElementById("input-code");
+      if (this.has_numeric_code && inputCodeEl) {
+        inputCodeEl.style.display = armVisible ? "none" : "";
       }
     }
   }
-  
-  _showOverrideCheckbox(visible) {
-    const overrideCheckbox = this.shadowRoot.getElementById("overrideCheckbox");
-    const overrideLabel = this.shadowRoot.getElementById("overrideLabel");
-      if (visible) {
-        overrideCheckbox.style.visibility = "visible";
-        overrideLabel.style.visibility = "visible";
-      } else {
-         overrideCheckbox.checked = false; // always clear override checkbox when hiding it
-         overrideCheckbox.style.visibility = "hidden";
-         overrideLabel.style.visibility = "hidden";
-      }
-   }
-  
+
+  _showOverrideCheckbox(visible: boolean) {
+    const overrideCheckbox = this.shadowRoot?.getElementById("overrideCheckbox") as HTMLFormElement;
+    const overrideLabel = this.shadowRoot?.getElementById("overrideLabel") as HTMLLabelElement;
+    if (visible) {
+      overrideCheckbox.style.visibility = "visible";
+      overrideLabel.style.visibility = "visible";
+    } else {
+      overrideCheckbox.checked = false; // always clear override checkbox when hiding it
+      overrideCheckbox.style.visibility = "hidden";
+      overrideLabel.style.visibility = "hidden";
+    }
+  }
+
   _updateReady() {
-    const root = this.shadowRoot;
-    const card = root.lastChild;
     const config = this._config;
-  
+    let status: string;
+
     const state_str = "state.alarm_control_panel." + this._state;
     status = this._label(state_str);
-   
-    var showOverrideCheckbox = false;
+
+    let showOverrideCheckbox = false;
     if (config.confirm_entities && this._state === "disarmed") {
       if (this._entitiesReady) {
-         status = status + " - " + this._label("ready");
-         if (config.disable_arm_if_not_ready) {
-           root.querySelectorAll(".actions button").forEach(element => {
-             element.removeAttribute("disabled");
-           })
-         }
+        status = status + " - " + this._label("ready");
+        if (config.disable_arm_if_not_ready) {
+          this.shadowRoot?.querySelectorAll(".actions button").forEach(element => {
+            element.removeAttribute("disabled");
+          });
+        }
       } else {
-         status = status + " - " + this._label("not_ready");
-         if (config.disable_arm_if_not_ready) {
-            showOverrideCheckbox = config.show_override_if_not_ready // this is the only case that shows the override checkbox
-            const allowOverride = root.getElementById("overrideCheckbox").checked;
-            if (allowOverride) {
-               root.querySelectorAll(".actions button").forEach(element => {
-                  element.removeAttribute("disabled");
-               })
-            } else {
-               root.querySelectorAll(".actions button").forEach(element => {
-                  element.setAttribute("disabled", true);
-               })
-            }
-         }
+        status = status + " - " + this._label("not_ready");
+        if (config.disable_arm_if_not_ready) {
+          showOverrideCheckbox = config.show_override_if_not_ready ?? false; // this is the only case that shows the override checkbox
+          const checkbox = this.shadowRoot?.getElementById("overrideCheckbox") as HTMLFormElement;
+          const allowOverride = checkbox.checked;
+          if (allowOverride) {
+            this.shadowRoot?.querySelectorAll(".actions button").forEach(element => {
+              element.removeAttribute("disabled");
+            });
+          } else {
+            this.shadowRoot?.querySelectorAll(".actions button").forEach(element => {
+              element.setAttribute("disabled", "true");
+            });
+          }
+        }
       }
-   }
+    }
 
     this._showOverrideCheckbox(showOverrideCheckbox);
 
     if (config.title) {
-      card.header = config.title;
-      root.getElementById("state-text").innerHTML = status;
-      root.getElementById("state-text").className = `state ${this._state}`;
-    } else {
-      card.header = status;
+      const stateTextEl = this.shadowRoot?.getElementById("state-text");
+      if (stateTextEl) {
+        stateTextEl.innerHTML = status;
+        stateTextEl.className = `state ${this._state}`;
+      }
     }
   }
-  
+
   _actionButtons() {
-    let disarmButtonIfHideKeypad = '';
+    let disarmButtonIfHideKeypad = "";
     if (this._config.hide_keypad) {
-      disarmButtonIfHideKeypad = `<div id="disarm-actions" class="actions">${this._actionButton('disarm')}</div>`;
+      disarmButtonIfHideKeypad = `<div id="disarm-actions" class="actions">${this._actionButton(
+        "disarm"
+      )}</div>`;
     }
     return `
       <div id="arm-actions" class="actions">
-        ${this._config.states.map(el => `${this._actionButton(el)}`).join('')}
+        ${this._config.states?.map(el => `${this._actionButton(el)}`).join("")}
       </div>
       ${disarmButtonIfHideKeypad}
-      <div id="override-option" class="override"><input name="Override" id="overrideCheckbox" type="checkbox" /><label id="overrideLabel" for="override">Override</label></div>`
+      <div id="override-option" class="override"><input name="Override" id="overrideCheckbox" type="checkbox" /><label id="overrideLabel" for="override">Override</label></div>`;
   }
 
-  _stateIconLabel(state) {
+  _stateIconLabel(state: string) {
     const stateLabel = state.split("_").pop();
-    if (stateLabel === "disarmed" || stateLabel === "triggered" || !stateLabel)
-       return "";
+    if (stateLabel === "disarmed" || stateLabel === "triggered" || !stateLabel) return "";
     return stateLabel;
   }
 
@@ -298,7 +345,7 @@ class AlarmControlPanelCard extends HTMLElement {
         </div>
     </ha-label-badge-icon>`;
   }
-  
+
   _timerCanvas() {
     // radius 30.  strokewidth = radius/4. width = 2*radius + strokewidth * 2
     if (this._config.show_countdown_timer) {
@@ -309,9 +356,9 @@ class AlarmControlPanelCard extends HTMLElement {
           </canvas>
         </countdown-timer>`;
     }
-    return '';
+    return "";
   }
-  _actionButton(state) {
+  _actionButton(state: string) {
     return `<button outlined id="${state}">
       ${this._label("ui.card.alarm_control_panel." + state)}</button>`;
   }
@@ -324,133 +371,147 @@ class AlarmControlPanelCard extends HTMLElement {
     const timeRemaining = Math.round(Math.max(durationSeconds - elapsedSeconds, 0));
     const elapsedPercent = elapsedSeconds / durationSeconds;
 
-    var canvas = this.shadowRoot.getElementById("timerCanvas");
-    var ctx = canvas.getContext("2d");
+    const canvas = this.shadowRoot?.getElementById("timerCanvas") as HTMLCanvasElement;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      return;
+    }
+
     ctx.lineWidth = this._timerStrokeWidth;
     ctx.clearRect(0, 0, this._timerSize, this._timerSize);
-    
+
     const centerPos = this._timerSize / 2;
-    if (elapsedPercent > 0.75)
-      ctx.fillStyle = 'red';
-    else if (elapsedPercent > 0.5)
-      ctx.fillStyle = 'orange';
-    else
-      ctx.fillStyle = '#8ac575';
-      
+    if (elapsedPercent > 0.75) ctx.fillStyle = "red";
+    else if (elapsedPercent > 0.5) ctx.fillStyle = "orange";
+    else ctx.fillStyle = "#8ac575";
+
     // draw filled center circle
     ctx.beginPath();
-    ctx.arc(centerPos, centerPos, this._timerRadius, 0, 2*Math.PI, false);
+    ctx.arc(centerPos, centerPos, this._timerRadius, 0, 2 * Math.PI, false);
     ctx.fill();
-    
+
     // draw arc around edges counter-clockwise from top-center 1.5*pi to 3.5*pi
     const endAngle = 3.5 * Math.PI - 2 * Math.PI * elapsedPercent;
     ctx.beginPath();
     ctx.arc(centerPos, centerPos, this._timerRadius, 1.5 * Math.PI, endAngle, false);
-    ctx.strokeStyle = '#477050';
+    ctx.strokeStyle = "#477050";
     ctx.stroke();
-    
+
     // draw text label
-    const fontSize = this._timerRadius/1.2;
+    const fontSize = this._timerRadius / 1.2;
     ctx.font = "700 " + fontSize + "px sans-serif";
     ctx.lineWidth = this._strokeWidth;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillStyle  = "white";
-    ctx.fillText(timeRemaining, this._timerSize/2, this._timerSize/2);
+    ctx.fillStyle = "white";
+    ctx.fillText(`${timeRemaining}`, this._timerSize / 2, this._timerSize / 2);
   }
 
   _setupActions() {
-    const root = this.shadowRoot;
-    const card = this.shadowRoot.lastChild;
     const config = this._config;
 
     if (config.auto_hide) {
-      root.getElementById("badge-icon").addEventListener('click', event => {
-        var content = root.getElementById("content");
-        if (content.style.display === 'none') {
-          content.style.display = '';
-        } else {
-          content.style.display = 'none';
-        }
-      })
+      const badgeIconEl = this.shadowRoot?.getElementById("badge-icon");
+      if (badgeIconEl) {
+        const contentEl = this.shadowRoot?.getElementById("content");
+
+        badgeIconEl.addEventListener("click", () => {
+          if (contentEl) {
+            if (contentEl.style.display === "none") {
+              contentEl.style.display = "";
+            } else {
+              contentEl.style.display = "none";
+            }
+          }
+        });
+      }
     }
 
-    card.querySelectorAll(".actions button").forEach(element => {
+    this.shadowRoot?.querySelectorAll(".actions button").forEach(element => {
       // note- disarm button is handled in _setupKeypad
-      element.addEventListener('click', event => {
-        const input = card.querySelector('ha-textfield');
-        const value = input ? input.value : '';
+      element.addEventListener("click", () => {
+        const inputEl = this.shadowRoot?.querySelector("ha-textfield") as HTMLFormElement;
+
+        const value = inputEl ? inputEl.value : "";
         this._callService(element.id, value);
-      })
-    })
-    
-    this.shadowRoot.getElementById("overrideCheckbox").addEventListener("change", () => {
-		this._updateReady();
+      });
+    });
+
+    this.shadowRoot?.getElementById("overrideCheckbox")?.addEventListener("change", () => {
+      this._updateReady();
     });
   }
 
-  _callService(service, code) {
-    const input = this.shadowRoot.lastChild.querySelector("ha-textfield");
-    this.myhass.callService('alarm_control_panel', `alarm_${service}`, {
+  _callService(service: string, code: string) {
+    const input = this.shadowRoot?.querySelector("ha-textfield") as HTMLFormElement;
+    this.myhass.callService("alarm_control_panel", `alarm_${service}`, {
       entity_id: this._config.entity,
-      code: code,
+      code: code
     });
-    if (input) input.value = '';
+    if (input) {
+      input.value = "";
+    }
   }
 
-  _showCountdownTimer(show)
-  {
-    if (this._config.show_countdown_timer)
-      this.shadowRoot.getElementById("countdown").style.display = show ? '' : 'none';
-    else
+  _showCountdownTimer(show: boolean) {
+    const countdownEL = this.shadowRoot?.getElementById("countdown");
+    const badgeIconEl = this.shadowRoot?.getElementById("badge-icon");
+    if (this._config.show_countdown_timer) {
+      if (countdownEL) {
+        countdownEL.style.display = show ? "" : "none";
+      }
+    } else {
       show = false;
-    this.shadowRoot.getElementById("badge-icon").style.display = show ? 'none' : '';
+    }
+    if (badgeIconEl) {
+      badgeIconEl.style.display = show ? "none" : "";
+    }
   }
 
   _setupInput() {
     if (this._config.auto_enter) {
-      const input = this.shadowRoot.lastChild.querySelector("ha-textfield");
-      input.addEventListener('input', event => { this._autoEnter() })
+      const input = this.shadowRoot?.querySelector("ha-textfield") as HTMLFormElement;
+      input?.addEventListener("input", () => {
+        this._autoEnter();
+      });
     }
   }
 
   _setupKeypad() {
-    const root = this.shadowRoot;
-
-    const input = root.lastChild.querySelector('ha-textfield');
-    root.querySelectorAll(".pad button").forEach(element => {
-      if (element.getAttribute('value') ===
-        this._label("ui.card.alarm_control_panel.clear_code")) {
-        element.addEventListener('click', event => {
-          input.value = '';
-        })
+    const input = this.shadowRoot?.querySelector("ha-textfield") as HTMLFormElement;
+    this.shadowRoot?.querySelectorAll(".pad button").forEach(element => {
+      if (element.getAttribute("value") === this._label("ui.card.alarm_control_panel.clear_code")) {
+        element.addEventListener("click", () => {
+          input.value = "";
+        });
       } else if (element.id === "disarm") {
-       element.addEventListener('click', event => {
-            this._callService("disarm", input.value);
-        })
+        element.addEventListener("click", () => {
+          this._callService("disarm", input.value);
+        });
       } else {
-        element.addEventListener('click', event => {
-          input.value += element.getAttribute('value');
+        element.addEventListener("click", () => {
+          input.value += element.getAttribute("value");
           this._autoEnter();
-        })
+        });
       }
     });
   }
 
   _autoEnter() {
-    const config = this._config;
-
-    if (config.auto_enter) {
-      const card = this.shadowRoot.lastChild;
-      const code = card.querySelector("ha-textfield").value;
-      if (code.length == config.auto_enter.code_length && this._autoarm_action != "disabled") {
+    if (this._config.auto_enter) {
+      const input = this.shadowRoot?.querySelector("ha-textfield") as HTMLFormElement;
+      const code = input.value;
+      if (
+        code.length == this._config.auto_enter.code_length &&
+        this._autoarm_action != "disabled"
+      ) {
         this._callService(this._autoarm_action, code);
       }
     }
   }
 
-  _keypad(entity) {
-    if (this._config.hide_keypad || !this.has_numeric_code) return '';
+  _keypad() {
+    if (this._config.hide_keypad || !this.has_numeric_code) return "";
 
     return `
       <div id="keypad" class="pad">
@@ -470,31 +531,30 @@ class AlarmControlPanelCard extends HTMLElement {
           ${this._keypadButton("3", "DEF")}
           ${this._keypadButton("6", "MNO")}
           ${this._keypadButton("9", "WXYZ")}
-          <div id="disarm-actions">${this._actionButton('disarm')}</div>
+          <div id="disarm-actions">${this._actionButton("disarm")}</div>
         </div>
       </div>`;
   }
 
   _confirmEntitiesReady() {
     if (!this._config.confirm_entities) return true;
-    for (var i = 0; i < this._config.confirm_entities.length; i++) {
-       if (this.myhass.states[this._config.confirm_entities[i]].state != "off")
-         return false;
+    for (let i = 0; i < this._config.confirm_entities.length; i++) {
+      if (this.myhass.states[this._config.confirm_entities[i]].state != "off") return false;
     }
     return true;
   }
 
-  _keypadButton(button, alpha, id='') {
-    let letterHTML = '';
+  _keypadButton(button: string, alpha: string, id = "") {
+    let letterHTML = "";
     if (this._config.display_letters) {
-      letterHTML = `<div class='alpha'>${alpha}</div>`
+      letterHTML = `<div class='alpha'>${alpha}</div>`;
     }
-    if (id == '') id = button;
+    if (id == "") id = button;
     return `<button id="key${id}" value="${button}">${button}${letterHTML}</button>`;
   }
 
-  _style(icon_style, entity) {
-    const style = document.createElement('style');
+  _style(icon_style: string) {
+    const style = document.createElement("style");
     style.textContent = `
       ha-card {
         position: relative;
@@ -610,15 +670,6 @@ class AlarmControlPanelCard extends HTMLElement {
         --alarm-state-color: var(--alarm-color-pending);
         animation: pulse 1s infinite;
       }
-//      @keyframes pulse {
-//        0% {
-//          --ha-label-badge-color: var(--alarm-state-color);
-//        }
-//        100% {
-//          --ha-label-badge-color: rgba(255, 153, 0, 0.3);
-//        }
-//      }
-
       ha-textfield {
         display: block;
         text-align: center;
@@ -728,13 +779,12 @@ class AlarmControlPanelCard extends HTMLElement {
     return style;
   }
 
-  _label(label, default_label=undefined) {
+  _label(label: string, default_label = undefined) {
     // Just show "raw" label; useful when want to see underlying const
     // so you can define your own label.
     if (this._config.show_label_ids) return label;
 
-    if (this._config.labels && this._config.labels[label])
-      return this._config.labels[label];
+    if (this._config.labels && this._config.labels[label]) return this._config.labels[label];
 
     const lang = this.myhass.selectedLanguage || this.myhass.language;
     const translations = this.myhass.resources[lang];
@@ -743,8 +793,11 @@ class AlarmControlPanelCard extends HTMLElement {
     if (default_label) return default_label;
 
     // If all else fails then prettify the passed in label const
-    const last_bit = label.split('.').pop();
-    return last_bit.split('_').join(' ').replace(/^\w/, c => c.toUpperCase());
+    const last_bit = label.split(".").pop();
+    return last_bit
+      ?.split("_")
+      .join(" ")
+      .replace(/^\w/, c => c.toUpperCase());
   }
 
   getCardSize() {
@@ -752,5 +805,4 @@ class AlarmControlPanelCard extends HTMLElement {
   }
 }
 
-customElements.define('alarm_control_panel-card', AlarmControlPanelCard);
-
+customElements.define("alarm_control_panel-card", AlarmControlPanelCard);
